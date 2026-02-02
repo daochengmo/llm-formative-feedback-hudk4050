@@ -1,7 +1,8 @@
 pandas
 numpy
 python-dotenv
-requests
 tqdm
+requests
 matplotlib
-
+google-genai
+jsonschema
