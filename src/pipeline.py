@@ -1,126 +1,87 @@
 import json
-from pathlib import Path
-from typing import Any, Dict, Optional
+import os
+from typing import Dict, Any
 
 import pandas as pd
+from tqdm import tqdm
+
+from .llm_client import LLMClient
+from .prompts import V1_PROMPT, V2_PROMPT, render_prompt
+from .utils import compact_json_dumps
 
 
-def _safe_json_loads(value: Any) -> Optional[Dict[str, Any]]:
-    if value is None:
-        return None
-    if isinstance(value, float) and pd.isna(value):
-        return None
-    s = value if isinstance(value, str) else str(value)
-    s = s.strip()
-    if not s:
-        return None
+def run_llm_stage(df_in: pd.DataFrame, out_raw_csv: str) -> pd.DataFrame:
+    client = LLMClient()
 
-    try:
-        return json.loads(s)
-    except Exception:
-        cleaned = s.replace("\\n", "\n").replace("\\t", "\t")
+    rows = []
+    for _, r in tqdm(df_in.iterrows(), total=len(df_in), desc="LLM feedback"):
+        essay_id = int(r["essay_id"])
+        essay_text = str(r["essay_clean"])
+
+        v1_prompt = render_prompt(V1_PROMPT, essay_text)
+        v2_prompt = render_prompt(V2_PROMPT, essay_text)
+
+        v1_obj = client.generate_feedback_obj(v1_prompt)
+        v2_obj = client.generate_feedback_obj(v2_prompt)
+
+        rows.append(
+            {
+                "essay_id": essay_id,
+                "v1_json": compact_json_dumps(v1_obj),
+                "v2_json": compact_json_dumps(v2_obj),
+            }
+        )
+
+    df_raw = pd.DataFrame(rows)
+    df_raw.to_csv(out_raw_csv, index=False)
+    return df_raw
+
+
+def raw_to_wide(df_raw: pd.DataFrame, out_wide_csv: str) -> pd.DataFrame:
+    def parse_col(s: str) -> Dict[str, Any]:
         try:
-            return json.loads(cleaned)
+            return json.loads(s) if isinstance(s, str) else {}
         except Exception:
-            return None
+            return {}
+
+    out = []
+    for _, r in df_raw.iterrows():
+        v1 = parse_col(r.get("v1_json", ""))
+        v2 = parse_col(r.get("v2_json", ""))
+
+        out.append(
+            {
+                "essay_id": int(r["essay_id"]),
+                "v1_overall_summary": v1.get("overall_summary", ""),
+                "v2_overall_summary": v2.get("overall_summary", ""),
+                "v1_positives": json.dumps(v1.get("positives", []), ensure_ascii=False),
+                "v2_positives": json.dumps(v2.get("positives", []), ensure_ascii=False),
+                "v1_feedback_items": json.dumps(v1.get("feedback_items", []), ensure_ascii=False),
+                "v2_feedback_items": json.dumps(v2.get("feedback_items", []), ensure_ascii=False),
+            }
+        )
+
+    df_wide = pd.DataFrame(out)
+    df_wide.to_csv(out_wide_csv, index=False)
+    return df_wide
 
 
-def _extract(obj: Optional[Dict[str, Any]]) -> Dict[str, str]:
-    if not obj:
-        return {"overall_summary": "", "positives": "[]", "feedback_items": "[]"}
-
-    overall = obj.get("overall_summary") or obj.get("summary") or ""
-    positives = obj.get("positives") or []
-    feedback_items = obj.get("feedback_items") or []
-
-    return {
-        "overall_summary": str(overall),
-        "positives": json.dumps(positives, ensure_ascii=False),
-        "feedback_items": json.dumps(feedback_items, ensure_ascii=False),
-    }
-
-
-def build_eval_pack_review(
-    eval_pack_raw_path: str | Path,
-    sample_set_path: str | Path,
-    output_path: str | Path,
-    *,
-    v1_col: str = "v1_json",
-    v2_col: str = "v2_json",
-    id_col: str = "essay_id",
-) -> pd.DataFrame:
-    """
-    Create outputs/eval_pack_review.csv from cached raw outputs.
-
-    Offline and reproducible:
-      - No LLM API calls
-      - Parse cached v1_json/v2_json from eval_pack_raw.csv
-      - Ensure essay_text exists (join sample_50_set1.csv if needed)
-
-    Output columns:
-      essay_id, essay_set, domain1_score, essay_text,
-      v1_overall_summary, v2_overall_summary,
-      v1_positives, v2_positives,
-      v1_feedback_items, v2_feedback_items
-    """
-    eval_pack_raw_path = Path(eval_pack_raw_path)
-    sample_set_path = Path(sample_set_path)
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    raw = pd.read_csv(eval_pack_raw_path)
-    essays = pd.read_csv(sample_set_path)
-
-    # Normalize common essay columns
-    if "essay_text" not in essays.columns and "essay" in essays.columns:
-        essays = essays.rename(columns={"essay": "essay_text"})
-    if "essay_set" not in essays.columns and "set" in essays.columns:
-        essays = essays.rename(columns={"set": "essay_set"})
-
-    # Only bring columns that are missing in raw to avoid _x/_y collisions
-    join_cols = [id_col]
-    for c in ["essay_set", "domain1_score", "essay_text"]:
-        if c not in raw.columns and c in essays.columns:
-            join_cols.append(c)
-
-    if len(join_cols) > 1:
-        raw = raw.merge(essays[join_cols], on=id_col, how="left")
-
-    required = ["essay_id", "essay_set", "domain1_score", "essay_text", v1_col, v2_col]
-    missing = [c for c in required if c not in raw.columns]
-    if missing:
-        raise ValueError(f"Missing required columns after join: {missing}")
-
-    v1_obj = raw[v1_col].apply(_safe_json_loads)
-    v2_obj = raw[v2_col].apply(_safe_json_loads)
-
-    v1 = v1_obj.apply(_extract).apply(pd.Series).add_prefix("v1_")
-    v2 = v2_obj.apply(_extract).apply(pd.Series).add_prefix("v2_")
-
-    out = pd.concat(
-        [
-            raw[["essay_id", "essay_set", "domain1_score", "essay_text"]],
-            v1[["v1_overall_summary", "v1_positives", "v1_feedback_items"]],
-            v2[["v2_overall_summary", "v2_positives", "v2_feedback_items"]],
-        ],
-        axis=1,
-    )
-
-    out = out[
-        [
-            "essay_id",
-            "essay_set",
-            "domain1_score",
-            "essay_text",
-            "v1_overall_summary",
-            "v2_overall_summary",
-            "v1_positives",
-            "v2_positives",
-            "v1_feedback_items",
-            "v2_feedback_items",
-        ]
+def build_review_pack(df_meta: pd.DataFrame, df_wide: pd.DataFrame, out_review_csv: str) -> pd.DataFrame:
+    # df_meta should contain: essay_id, essay_set, domain1_score, essay_text
+    df = df_meta.merge(df_wide, on="essay_id", how="inner")
+    cols = [
+        "essay_id",
+        "essay_set",
+        "domain1_score",
+        "essay_text",
+        "v1_overall_summary",
+        "v2_overall_summary",
+        "v1_positives",
+        "v2_positives",
+        "v1_feedback_items",
+        "v2_feedback_items",
     ]
-
-    out.to_csv(output_path, index=False)
-    return out
+    df = df[cols]
+    df.to_csv(out_review_csv, index=False)
+    return df
 
