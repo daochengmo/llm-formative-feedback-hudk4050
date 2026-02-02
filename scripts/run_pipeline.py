@@ -1,37 +1,44 @@
 import argparse
-import sys
-from pathlib import Path
+import os
+import pandas as pd
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
-
-from src.pipeline import build_eval_pack_review  # noqa: E402
+from src.pipeline import run_llm_stage, raw_to_wide, build_review_pack
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(
-        description="Build eval_pack_review.csv from cached raw outputs and sample essays."
-    )
-    p.add_argument("--data-dir", type=str, default="data")
-    p.add_argument("--out-dir", type=str, default="outputs")
-    p.add_argument("--eval-pack-raw", type=str, default="eval_pack_raw.csv")
-    p.add_argument("--sample-set", type=str, default="sample_50_set1.csv")
-    p.add_argument("--out-file", type=str, default="eval_pack_review.csv")
-    args = p.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--clean_csv", default="data/sample_50_with_clean.csv")
+    ap.add_argument("--meta_csv", default="data/sample_50_set1.csv")
+    ap.add_argument("--out_dir", default="outputs")
+    ap.add_argument("--skip_llm", action="store_true")
+    ap.add_argument("--raw_csv", default="data/eval_pack_raw.csv")
+    args = ap.parse_args()
 
-    data_dir = Path(args.data_dir)
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    os.makedirs(args.out_dir, exist_ok=True)
 
-    build_eval_pack_review(
-        eval_pack_raw_path=data_dir / args.eval_pack_raw,
-        sample_set_path=data_dir / args.sample_set,
-        output_path=out_dir / args.out_file,
-    )
+    out_raw = os.path.join(args.out_dir, "eval_pack_raw.csv")
+    out_wide = os.path.join(args.out_dir, "eval_pack_wide.csv")
+    out_review = os.path.join(args.out_dir, "eval_pack_review.csv")
 
-    print(f"Saved: {out_dir / args.out_file}")
+    df_clean = pd.read_csv(args.clean_csv)
+    df_meta = pd.read_csv(args.meta_csv)
+
+    if args.skip_llm:
+        df_raw = pd.read_csv(args.raw_csv)
+    else:
+        df_raw = run_llm_stage(df_clean, out_raw)
+
+    df_wide = raw_to_wide(df_raw, out_wide)
+
+    # meta uses original essay_text, not the cleaned one
+    df_review = build_review_pack(df_meta, df_wide, out_review)
+
+    print("Wrote:")
+    print(out_raw if not args.skip_llm else "(skipped llm, used raw_csv)")
+    print(out_wide)
+    print(out_review)
+    print("Rows:", len(df_review))
 
 
 if __name__ == "__main__":
     main()
-
