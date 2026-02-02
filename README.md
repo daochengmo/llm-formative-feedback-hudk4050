@@ -8,11 +8,19 @@ Reproducible pipeline for generating and evaluating LLM-based formative feedback
 ## Repo Structure
 - `data/` input datasets (de-identified samples)
 - `notebooks/` exploratory notebook used during development
-- `src/` reusable pipeline modules (LLM client, prompts, evaluation utilities)
+- `src/` reusable pipeline modules (LLM client, prompts, utilities)
 - `scripts/` entry points for running the pipeline
 - `outputs/` generated artifacts
 
-## Quickstart
-1. Create environment and install dependencies
+## Quickstart (SDK only)
+
+### 0) Prereqs
+- Python 3.10+ recommended
+- A Gemini API key
+
+### 1) Set environment variables
+Create a `.env` file at repo root (or export env vars in your shell):
+
 ```bash
-pip install -r requirements.txt
+cp .env.example .env
+# then edit .env and fill GOOGLE_API_KEY
